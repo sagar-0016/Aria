@@ -1584,6 +1584,9 @@ class ToolExecutor:
 
         if any(phrase in lowered for phrase in ["open browser", "open chrome", "open firefox"]):
             return self.execute_call({"tool": "browser", "action": "open_target", "target": "browser"})
+        match = re.match(r"^open\s+(.+?)\s+on\s+(google|youtube|youtube music|yt music|github)$", lowered)
+        if match:
+            return self.execute_call({"tool": "browser", "action": "search_site", "site": match.group(2).strip(), "query": match.group(1).strip()})
         match = re.match(r"^open\s+youtube(?:\s+and)?\s+search\s+(.+)$", lowered)
         if match:
             return self.execute_call({"tool": "browser", "action": "search_site", "site": "youtube", "query": match.group(1).strip()})
@@ -1631,6 +1634,9 @@ class ToolExecutor:
 
         if lowered == "search":
             return {"used": True, "tool": "search", "action": "search", "input": {"query": ""}, "result": {"ok": False, "message": "What should I search for?", "items": [], "execution": {"kind": "query", "value": ""}}}
+        match = re.match(r"^(?:search|look up|find)\s+(.+?)\s+on\s+(google|youtube|youtube music|yt music|github)$", lowered)
+        if match:
+            return self.execute_call({"tool": "browser", "action": "search_site", "site": match.group(2).strip(), "query": match.group(1).strip()})
         match = re.search(r"(?:search|look up|find)\s+(.+)", lowered)
         if match:
             query = match.group(1).strip()
@@ -1748,6 +1754,12 @@ def normalize_user_text(text):
         if lowered == str(source).strip().lower():
             return str(replacement)
     return normalized
+
+
+def is_wake_word_only(text):
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower()).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned in set(load_wake_words())
 
 
 def ollama_available():
@@ -1939,6 +1951,7 @@ def should_reply_with_tool_result(user_text, tool_events):
     if tool_name in {"browser", "system", "files", "clipboard"} and (
         lowered.startswith("open ")
         or lowered.startswith("play ")
+        or lowered.startswith("search ")
         or lowered.startswith("press ")
         or lowered.startswith("hit ")
         or lowered.startswith("tap ")
@@ -1952,6 +1965,8 @@ def should_reply_with_tool_result(user_text, tool_events):
         or "disk" in lowered
         or "system info" in lowered
     ):
+        return True
+    if tool_name == "search" and (lowered.startswith("search ") or lowered.startswith("look up ") or lowered.startswith("find ")):
         return True
     return False
 
@@ -2189,6 +2204,47 @@ class AriaHandler(BaseHTTPRequestHandler):
             text = normalize_user_text((payload.get("text") or "").strip())
             if not text:
                 self._send_json({"error": "Text is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if is_wake_word_only(text):
+                active = active_model_snapshot()
+                reply = "Listening."
+                self._send_json(
+                    {
+                        "reply": reply,
+                        "active_model": active["active_model"],
+                        "active_label": active["label"],
+                        "active_source": active["type"],
+                        "offline_mode": active["offline_mode"],
+                        "tool_events": [],
+                        "result_cards": [],
+                        "status": status_payload(),
+                        "stop_speaking": True,
+                    }
+                )
+                return
+            if text.lower() in {"it's not listening", "its not listening", "not listening", "you are not listening", "you're not listening"}:
+                active = active_model_snapshot()
+                reply = "If the mic toggle is on, I should stay armed. Try toggling the mic off and back on once if wake listening has stalled."
+                CHAT_HISTORY.extend(
+                    [
+                        {"role": "user", "content": text},
+                        {"role": "assistant", "content": reply},
+                    ]
+                )
+                log_interaction(text, reply, active["active_model"], [])
+                self._send_json(
+                    {
+                        "reply": reply,
+                        "active_model": active["active_model"],
+                        "active_label": active["label"],
+                        "active_source": active["type"],
+                        "offline_mode": active["offline_mode"],
+                        "tool_events": [],
+                        "result_cards": [],
+                        "status": status_payload(),
+                        "stop_speaking": True,
+                    }
+                )
                 return
             if text.lower() in {"shut up", "stop talking", "be quiet", "quiet"}:
                 active = active_model_snapshot()
@@ -3210,48 +3266,6 @@ PYEOF
       color: var(--muted);
     }
     .notice strong { color: var(--text); }
-    .settings-collapsible {
-      margin-top: 10px;
-      border-top: 1px solid var(--line);
-      padding-top: 12px;
-      display: grid;
-      gap: 12px;
-    }
-    .settings-collapsible-toggle {
-      width: 100%;
-      justify-content: space-between;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      box-shadow: none;
-      border-radius: 0;
-    }
-    .settings-collapsible-toggle:hover {
-      transform: none;
-      box-shadow: none;
-    }
-    .settings-collapsible-body {
-      display: none;
-      gap: 12px;
-    }
-    .settings-collapsible.open .settings-collapsible-body {
-      display: grid;
-    }
-    .improvement-field {
-      display: grid;
-      gap: 8px;
-    }
-    .improvement-field textarea {
-      width: 100%;
-      min-height: 96px;
-      resize: vertical;
-      padding: 14px 16px;
-      background: var(--panel-strong);
-      color: var(--text);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      font: inherit;
-    }
     @media (max-width: 720px) {
       body { padding: 16px; }
       .hero { grid-template-columns: 1fr; }
@@ -3377,23 +3391,6 @@ PYEOF
             <div id="installText" class="hint">No installation in progress.</div>
           </div>
           <div id="settingsNotice" class="notice"><strong>Ready.</strong> Choose a model to use, or keep Smart.</div>
-          <section id="improvementsSection" class="settings-collapsible">
-            <button id="improvementsToggleBtn" class="settings-collapsible-toggle" type="button" aria-expanded="false">
-              <span class="label" style="margin-bottom:0;">Personal Improvements</span>
-              <i data-lucide="chevron-down"></i>
-            </button>
-            <div class="settings-collapsible-body">
-              <div class="improvement-field">
-                <label for="improvementWakeWords">Wake Word Additions</label>
-                <input id="improvementWakeWords" placeholder="comma-separated aliases">
-              </div>
-              <div class="improvement-field">
-                <label for="improvementPromptAppend">Prompt Additions</label>
-                <textarea id="improvementPromptAppend" placeholder="extra runtime guidance that stays outside the installer"></textarea>
-              </div>
-              <button id="saveImprovementsBtn" type="button">Save Personal Improvements</button>
-            </div>
-          </section>
         </div>
       </div>
     </section>
@@ -3425,11 +3422,6 @@ PYEOF
     const installBar = document.getElementById("installBar");
     const installText = document.getElementById("installText");
     const settingsNotice = document.getElementById("settingsNotice");
-    const improvementsSection = document.getElementById("improvementsSection");
-    const improvementsToggleBtn = document.getElementById("improvementsToggleBtn");
-    const improvementWakeWords = document.getElementById("improvementWakeWords");
-    const improvementPromptAppend = document.getElementById("improvementPromptAppend");
-    const saveImprovementsBtn = document.getElementById("saveImprovementsBtn");
     const activeBadges = document.getElementById("activeBadges");
     const openaiKey = document.getElementById("openaiKey");
     const geminiKey = document.getElementById("geminiKey");
@@ -3455,6 +3447,9 @@ PYEOF
     let stateTimer = null;
     let wakeRegex = /\b(aria|area|arya)\b/i;
     let wakeWords = ["aria", "area", "arya"];
+    let lastWakeOnlyAt = 0;
+    let pendingWakePromptMode = "";
+    const repeatedWakeWindowMs = 2400;
     let appStatus = null;
     let statusPoll = null;
     let toolHistory = [];
@@ -3489,6 +3484,38 @@ PYEOF
         wakeWords = ["aria", "area", "arya"];
       }
       wakeRegex = new RegExp(`\\b(${wakeWords.map(escapeRegex).join("|")})\\b`, "i");
+    }
+
+    function stripWakeWords(text) {
+      const regex = new RegExp(`\\b(${wakeWords.map(escapeRegex).join("|")})\\b`, "ig");
+      return String(text || "").replace(regex, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function isWakeWordOnlyText(text) {
+      const raw = String(text || "").trim();
+      return !!raw && wakeRegex.test(raw) && !stripWakeWords(raw);
+    }
+
+    function beginWakePromptSequence() {
+      const mode = pendingWakePromptMode;
+      pendingWakePromptMode = "";
+      const promptText = mode === "repeat" ? "That's me, do you want to say something?" : "Wake word accepted. Say your command now.";
+      playCue(listeningSound);
+      setStatus("Listening", "listening");
+      setVoiceMode("Listening");
+      setTranscript(promptText);
+      const launchCapture = () => {
+        if (!sleepMode) startCommandCapture();
+      };
+      if (mode === "repeat" && speakReplies && "speechSynthesis" in window) {
+        stopSpeechPlayback();
+        const utterance = new SpeechSynthesisUtterance(promptText);
+        utterance.onend = launchCapture;
+        utterance.onerror = launchCapture;
+        window.speechSynthesis.speak(utterance);
+      } else {
+        setTimeout(launchCapture, mode === "repeat" ? 180 : 80);
+      }
     }
 
     function getChatEl() { return document.getElementById("chat"); }
@@ -3594,10 +3621,6 @@ PYEOF
       const sendBtn = getSendBtnEl();
       if (closeBtn) closeBtn.innerHTML = '<i data-lucide="x"></i>';
       if (sendBtn) sendBtn.innerHTML = '<i data-lucide="send-horizontal"></i>';
-      if (improvementsToggleBtn) {
-        const icon = improvementsSection.classList.contains("open") ? "chevron-up" : "chevron-down";
-        improvementsToggleBtn.innerHTML = `<span class="label" style="margin-bottom:0;">Personal Improvements</span><i data-lucide="${icon}"></i>`;
-      }
       updateInsightsPanel();
       refreshLucide();
     }
@@ -3938,12 +3961,9 @@ PYEOF
       const settings = status.settings;
       const active = status.active;
       updateWakeWords(status.wake_words || []);
-      const improvements = status.improvements || {};
       openaiKey.value = settings.api_keys.openai || "";
       geminiKey.value = settings.api_keys.gemini || "";
       anthropicKey.value = settings.api_keys.anthropic || "";
-      improvementWakeWords.value = Array.isArray(improvements.wake_words) ? improvements.wake_words.join(", ") : "";
-      improvementPromptAppend.value = improvements.prompt_append || "";
       renderCurrentBrain(active);
       renderConnectionStatus(status.provider_status);
       renderModels(status.models, settings.selected_model);
@@ -4155,6 +4175,10 @@ PYEOF
       };
       wakeRecognition.onend = () => {
         wakeListeningActive = false;
+        if (pendingWakePromptMode) {
+          beginWakePromptSequence();
+          return;
+        }
         if (wakeWordEnabled && !commandCaptureActive) scheduleWakeRestart();
       };
       wakeRecognition.onerror = (event) => {
@@ -4183,13 +4207,14 @@ PYEOF
           stopSpeechPlayback();
         }
 
-        const afterWake = text.replace(wakeRegex, "").trim();
+        const afterWake = stripWakeWords(text);
         commandCaptureActive = true;
         wakeListeningActive = false;
         try { wakeRecognition.stop(); } catch (_) {}
         stopSpeechPlayback();
 
         if (afterWake) {
+          lastWakeOnlyAt = 0;
           sendText(afterWake).finally(() => {
             commandCaptureActive = false;
             scheduleWakeRestart();
@@ -4197,10 +4222,10 @@ PYEOF
           return;
         }
 
-        setStatus("Listening", "listening");
-        setVoiceMode("Listening");
-        setTranscript("Wake word accepted. Say your command now.");
-        startCommandCapture();
+        const now = Date.now();
+        const repeatedWake = now - lastWakeOnlyAt < repeatedWakeWindowMs;
+        lastWakeOnlyAt = now;
+        pendingWakePromptMode = repeatedWake ? "repeat" : "plain";
       };
 
       listenBtn.onclick = async () => {
@@ -4228,6 +4253,10 @@ PYEOF
       };
       commandRecognition.onend = () => {
         commandCaptureActive = false;
+        if (pendingWakePromptMode) {
+          beginWakePromptSequence();
+          return;
+        }
         if (wakeWordEnabled && !assistantBusy) {
           setVoiceMode("Ready");
           scheduleWakeRestart();
@@ -4244,6 +4273,15 @@ PYEOF
       commandRecognition.onresult = (event) => {
         const text = event.results[event.resultIndex][0].transcript;
         setTranscript(text);
+        if (isWakeWordOnlyText(text)) {
+          const now = Date.now();
+          const repeatedWake = now - lastWakeOnlyAt < repeatedWakeWindowMs;
+          lastWakeOnlyAt = now;
+          pendingWakePromptMode = repeatedWake ? "repeat" : "plain";
+          try { commandRecognition.stop(); } catch (_) {}
+          return;
+        }
+        lastWakeOnlyAt = 0;
         sendText(text);
       };
 
@@ -4313,12 +4351,6 @@ PYEOF
       saveSettings({ theme: "dark" }).catch(() => {});
     };
 
-    improvementsToggleBtn.onclick = () => {
-      improvementsSection.classList.toggle("open");
-      improvementsToggleBtn.setAttribute("aria-expanded", improvementsSection.classList.contains("open") ? "true" : "false");
-      renderControlIcons();
-    };
-
     saveKeysBtn.onclick = async () => {
       await saveSettings({
         api_keys: {
@@ -4343,18 +4375,6 @@ PYEOF
       }
       showSettingsNotice("API keys validated successfully.", "success");
       await refreshStatus();
-    };
-
-    saveImprovementsBtn.onclick = async () => {
-      const wakeWords = improvementWakeWords.value.split(",").map((item) => item.trim()).filter(Boolean);
-      const promptAppend = improvementPromptAppend.value.trim();
-      const response = await postJSON("/api/improvements", {
-        wake_words: wakeWords,
-        prompt_append: promptAppend,
-      });
-      appStatus = response.status;
-      renderStatus(appStatus);
-      showSettingsNotice("Personal improvements saved.", "success");
     };
 
     (async () => {
