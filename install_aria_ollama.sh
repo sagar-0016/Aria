@@ -2361,6 +2361,7 @@ PYEOF
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ARIA</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23008F11'/%3E%3C/svg%3E">
   <style>
     :root {
       --bg: #f4f7fb;
@@ -3595,7 +3596,7 @@ PYEOF
       if (sendBtn) sendBtn.innerHTML = '<i data-lucide="send-horizontal"></i>';
       if (improvementsToggleBtn) {
         const icon = improvementsSection.classList.contains("open") ? "chevron-up" : "chevron-down";
-        improvementsToggleBtn.querySelector("i").outerHTML = `<i data-lucide="${icon}"></i>`;
+        improvementsToggleBtn.innerHTML = `<span class="label" style="margin-bottom:0;">Personal Improvements</span><i data-lucide="${icon}"></i>`;
       }
       updateInsightsPanel();
       refreshLucide();
@@ -4068,10 +4069,10 @@ PYEOF
     }
 
     function scheduleWakeRestart() {
-      if (sleepMode || !wakeWordEnabled || commandCaptureActive || assistantBusy || wakeListeningActive) return;
+      if (sleepMode || !wakeWordEnabled || commandCaptureActive || wakeListeningActive) return;
       clearTimeout(wakeRestartTimer);
       wakeRestartTimer = setTimeout(() => {
-        if (sleepMode || !wakeWordEnabled || commandCaptureActive || assistantBusy || wakeListeningActive) return;
+        if (sleepMode || !wakeWordEnabled || commandCaptureActive || wakeListeningActive) return;
         startWakeRecognition();
       }, wakeStartFailures ? 900 : 450);
     }
@@ -4093,7 +4094,7 @@ PYEOF
     function armWakeWatchdog() {
       if (wakeWatchdog) clearInterval(wakeWatchdog);
       wakeWatchdog = setInterval(() => {
-        if (sleepMode || !wakeWordEnabled || assistantBusy || commandCaptureActive) return;
+        if (sleepMode || !wakeWordEnabled || commandCaptureActive) return;
         if (!micReady || !wakeRecognition) return;
         if (!wakeListeningActive) {
           scheduleWakeRestart();
@@ -4102,7 +4103,7 @@ PYEOF
     }
 
     async function startCommandCapture() {
-      if (sleepMode || !commandRecognition || assistantBusy) return;
+      if (sleepMode || !commandRecognition) return;
       if (!(await ensureMic())) return;
       commandCaptureActive = true;
       stopSpeechPlayback();
@@ -4172,6 +4173,15 @@ PYEOF
         const text = chunks.join(" ").trim();
         setTranscript(text || "Heard audio while waiting for wake word.");
         if (!wakeRegex.test(text)) return;
+
+        if (assistantBusy && currentState === "thinking") {
+          setTranscript("Wake word heard. Finishing the current task first.");
+          return;
+        }
+        if (assistantBusy && currentState === "speaking") {
+          assistantBusy = false;
+          stopSpeechPlayback();
+        }
 
         const afterWake = text.replace(wakeRegex, "").trim();
         commandCaptureActive = true;
