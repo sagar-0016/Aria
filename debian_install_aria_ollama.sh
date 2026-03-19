@@ -19,7 +19,6 @@ ARIA_DIR=""
 BIN_DIR=""
 APP_DIR=""
 SYSTEMD_DIR=""
-ENVIRONMENT_DIR=""
 INSTALL_LOG=""
 MODEL_NAME="qwen:1.8b"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,25 +94,6 @@ run_logged_allow_fail() {
   return "${status}"
 }
 
-download_asset() {
-  local destination=$1
-  shift
-  local url
-  local tmp_file="${destination}.tmp"
-
-  for url in "$@"; do
-    if run_logged curl -fL --retry 3 --retry-delay 1 --connect-timeout 10 "$url" -o "${tmp_file}"; then
-      mv "${tmp_file}" "${destination}"
-      chown "${TARGET_USER}:${TARGET_GROUP}" "${destination}" || true
-      chmod 0644 "${destination}" || true
-      return 0
-    fi
-  done
-
-  rm -f "${tmp_file}"
-  return 1
-}
-
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -133,7 +113,6 @@ configure_target_context() {
   BIN_DIR="${TARGET_HOME}/.local/bin"
   APP_DIR="${TARGET_HOME}/.local/share/applications"
   SYSTEMD_DIR="${TARGET_HOME}/.config/systemd/user"
-  ENVIRONMENT_DIR="${TARGET_HOME}/.config/environment.d"
   INSTALL_LOG="${ARIA_DIR}/install.log"
 }
 
@@ -192,18 +171,6 @@ package_installed() {
       "${PKG_QUERY_CMD[@]}" "$1" >/dev/null 2>&1
       ;;
   esac
-}
-
-refresh_package_metadata() {
-  if run_logged_allow_fail "${UPDATE_CMD[@]}"; then
-    return 0
-  fi
-
-  warn "Package metadata refresh failed."
-  if [[ -f "${INSTALL_LOG}" ]]; then
-    tail -n 20 "${INSTALL_LOG}" >&2 || true
-  fi
-  die "Package manager update failed. Fix the repository issue shown above, then rerun the installer."
 }
 
 apt_enable_common_repos() {
@@ -296,6 +263,18 @@ cleanup_package_cache() {
   run_logged ${SUDO:+$SUDO} apt-get clean || true
 }
 
+refresh_package_metadata() {
+  if run_logged_allow_fail "${UPDATE_CMD[@]}"; then
+    return 0
+  fi
+
+  warn "Package metadata refresh failed."
+  if [[ -f "${INSTALL_LOG}" ]]; then
+    tail -n 20 "${INSTALL_LOG}" >&2 || true
+  fi
+  die "Package manager update failed. Fix the broken repository shown above, then rerun the installer."
+}
+
 ensure_pip_module() {
   local venv_python=$1
   local import_name=$2
@@ -351,32 +330,23 @@ write_runtime_files() {
   install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" \
     "${ARIA_DIR}/models" \
     "${ARIA_DIR}/tools" \
-    "${ARIA_DIR}/web" \
-    "${ENVIRONMENT_DIR}"
+    "${ARIA_DIR}/web"
 
-  if ! download_asset "${ARIA_DIR}/web/listening.mp3" \
-    "https://github.com/sagar-0016/AI_Assistant/raw/refs/heads/main/listening.mp3" \
-    "https://raw.githubusercontent.com/sagar-0016/AI_Assistant/main/listening.mp3"; then
+  if ! run_logged curl -fsSL "https://github.com/sagar-0016/AI_Assistant/raw/refs/heads/main/listening.mp3" -o "${ARIA_DIR}/web/listening.mp3"; then
     warn "Could not download the listening sound."
   fi
-  if ! download_asset "${ARIA_DIR}/web/processing_command.mp3" \
-    "https://github.com/sagar-0016/AI_Assistant/raw/refs/heads/main/processing_command.mp3" \
-    "https://raw.githubusercontent.com/sagar-0016/AI_Assistant/main/processing_command.mp3"; then
+  if ! run_logged curl -fsSL "https://github.com/sagar-0016/AI_Assistant/raw/refs/heads/main/processing_command.mp3" -o "${ARIA_DIR}/web/processing_command.mp3"; then
     warn "Could not download the processing sound."
   fi
-  if ! download_asset "${ARIA_DIR}/web/complete.mp3" \
-    "https://github.com/sagar-0016/AI_Assistant/raw/3e304abd5a657e3c465e5b3de00498966e1e32e1/i_am_your_assistant_.mp3" \
-    "https://raw.githubusercontent.com/sagar-0016/AI_Assistant/3e304abd5a657e3c465e5b3de00498966e1e32e1/i_am_your_assistant_.mp3"; then
+  if ! run_logged curl -fsSL "https://github.com/sagar-0016/AI_Assistant/raw/3e304abd5a657e3c465e5b3de00498966e1e32e1/i_am_your_assistant_.mp3" -o "${ARIA_DIR}/web/complete.mp3"; then
     warn "Could not download the completion sound."
   fi
   : > "${ARIA_DIR}/conversation.log"
-  if [[ ! -f "${ARIA_DIR}/wake_words.txt" ]]; then
-    cat >"${ARIA_DIR}/wake_words.txt" <<'EOF'
+  cat >"${ARIA_DIR}/wake_words.txt" <<'EOF'
 aria
 area
 arya
 EOF
-  fi
   if [[ ! -f "${ARIA_DIR}/user_improvements.json" ]]; then
     cat >"${ARIA_DIR}/user_improvements.json" <<'EOF'
 {
@@ -385,8 +355,7 @@ EOF
   "command_aliases": {},
   "routing_hints": {},
   "tool_preferences": {},
-  "prompt_append": "",
-  "training_notes": ""
+  "prompt_append": ""
 }
 EOF
   fi
@@ -424,7 +393,6 @@ DEFAULT_IMPROVEMENTS = {
     "routing_hints": {},
     "tool_preferences": {},
     "prompt_append": "",
-    "training_notes": "",
 }
 
 SUPPORTED_MODELS = {
@@ -622,9 +590,8 @@ class ImprovementsManager:
             "routing_hints": dict(DEFAULT_IMPROVEMENTS["routing_hints"]),
             "tool_preferences": dict(DEFAULT_IMPROVEMENTS["tool_preferences"]),
             "prompt_append": DEFAULT_IMPROVEMENTS["prompt_append"],
-            "training_notes": DEFAULT_IMPROVEMENTS["training_notes"],
         }
-        for key in ["wake_words", "speech_fixes", "command_aliases", "routing_hints", "tool_preferences", "prompt_append", "training_notes"]:
+        for key in ["wake_words", "speech_fixes", "command_aliases", "routing_hints", "tool_preferences", "prompt_append"]:
             if key in data:
                 if isinstance(merged[key], dict) and isinstance(data[key], dict):
                     merged[key].update(data[key])
@@ -645,7 +612,6 @@ class ImprovementsManager:
 
     def update(self, patch):
         current = self.get().copy()
-        replace_dicts = bool(patch.get("_replace_dicts"))
         for key in ["speech_fixes", "command_aliases", "routing_hints", "tool_preferences"]:
             current[key] = dict(current.get(key, {}))
         current["wake_words"] = list(current.get("wake_words", []))
@@ -653,11 +619,9 @@ class ImprovementsManager:
             current["wake_words"] = patch["wake_words"]
         for key in ["speech_fixes", "command_aliases", "routing_hints", "tool_preferences"]:
             if key in patch and isinstance(patch[key], dict):
-                current[key] = patch[key] if replace_dicts else {**current[key], **patch[key]}
+                current[key].update(patch[key])
         if "prompt_append" in patch and isinstance(patch["prompt_append"], str):
             current["prompt_append"] = patch["prompt_append"]
-        if "training_notes" in patch and isinstance(patch["training_notes"], str):
-            current["training_notes"] = patch["training_notes"]
         return self.save(current)
 PYEOF
 
@@ -1820,107 +1784,6 @@ def load_wake_words():
     return cleaned or ["aria", "area", "arya"]
 
 
-def assistant_name():
-    return load_wake_words()[0]
-
-
-def save_wake_words(primary_name, alternate_names):
-    primary = re.sub(r"\s+", " ", str(primary_name or "").strip().lower())
-    if not primary:
-        raise ValueError("Assistant name is required.")
-    names = [primary]
-    for raw in alternate_names:
-        normalized = re.sub(r"\s+", " ", str(raw or "").strip().lower())
-        if normalized and normalized not in names:
-            names.append(normalized)
-    WAKE_WORDS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    WAKE_WORDS_PATH.write_text("\n".join(names) + "\n", encoding="utf-8")
-    SETTINGS.update({"wake_word": primary})
-    return names
-
-
-def connected_cloud_advisor():
-    available = ROUTER.available_models()
-    preferred = SETTINGS.get().get("selected_model", "auto")
-    ordered = [preferred, "gpt-4o-mini", "gemini-1.5-flash", "gemini-1.5-flash-8b", "claude-haiku"]
-    seen = set()
-    for model_id in ordered:
-        if model_id in seen:
-            continue
-        seen.add(model_id)
-        model = available.get(model_id)
-        if not model or getattr(model, "type", "") != "cloud":
-            continue
-        if model.is_available():
-            return model
-    for model_id, model in available.items():
-        if model_id in seen:
-            continue
-        if getattr(model, "type", "") == "cloud" and model.is_available():
-            return model
-    return None
-
-
-def sanitize_improvement_patch(patch):
-    clean = {}
-    if not isinstance(patch, dict):
-        return clean
-    for key in ["speech_fixes", "command_aliases", "routing_hints", "tool_preferences"]:
-        value = patch.get(key)
-        if isinstance(value, dict):
-            filtered = {}
-            for raw_key, raw_value in value.items():
-                left = str(raw_key).strip()[:120]
-                right = str(raw_value).strip()[:280]
-                if left and right:
-                    filtered[left] = right
-            if filtered:
-                clean[key] = filtered
-    prompt_append = patch.get("prompt_append")
-    if isinstance(prompt_append, str) and prompt_append.strip():
-        clean["prompt_append"] = prompt_append.strip()[:1500]
-    wake_words = patch.get("wake_words")
-    if isinstance(wake_words, list):
-        cleaned_words = []
-        for raw in wake_words[:8]:
-            word = re.sub(r"\s+", " ", str(raw).strip().lower())
-            if word and word not in cleaned_words:
-                cleaned_words.append(word)
-        if cleaned_words:
-            clean["wake_words"] = cleaned_words
-    return clean
-
-
-def suggest_training_plan(notes):
-    advisor = connected_cloud_advisor()
-    if not advisor:
-        raise RuntimeError("Connect a cloud model first to generate training suggestions.")
-    improvements = IMPROVEMENTS.get()
-    prompt = (
-        "You are improving a Linux voice assistant for one user. "
-        "Return JSON only with keys from this schema: "
-        "{\"understanding\": string, \"changes\": {\"prompt_append\": string, \"speech_fixes\": object, "
-        "\"command_aliases\": object, \"routing_hints\": object, \"tool_preferences\": object, \"wake_words\": array}}. "
-        "Only include keys that help. Keep entries short, safe, and practical. "
-        "Do not include code blocks or explanations.\n\n"
-        f"Current assistant name list: {load_wake_words()}\n"
-        f"Current improvements: {json.dumps(improvements, ensure_ascii=True)}\n"
-        f"User notes: {notes}"
-    )
-    reply = advisor.chat(
-        [
-            {"role": "system", "content": "Return strict JSON only. Keep suggestions safe, concise, and schema-compliant."},
-            {"role": "user", "content": prompt},
-        ]
-    )
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", str(reply), re.DOTALL)
-    candidate = fenced.group(1) if fenced else str(reply).strip()
-    parsed = json.loads(candidate)
-    understanding = str(parsed.get("understanding", "")).strip()[:800]
-    changes = sanitize_improvement_patch(parsed.get("changes", {}))
-    return {"understanding": understanding, "changes": changes}
-
-
 def normalize_user_text(text):
     normalized = str(text or "")
     improvements = IMPROVEMENTS.get()
@@ -2238,7 +2101,6 @@ def serializable_models():
 def status_payload():
     settings = SETTINGS.get()
     active = active_model_snapshot()
-    wake_names = load_wake_words()
     installed = detect_installed_local_models()
     provider_status = {}
     for provider in ["openai", "gemini", "anthropic"]:
@@ -2255,9 +2117,7 @@ def status_payload():
         "install_status": current_install_status(),
         "ollama_available": ollama_available(),
         "tools": TOOLS.available_tools(),
-        "wake_words": wake_names,
-        "assistant_name": wake_names[0],
-        "assistant_aliases": wake_names[1:],
+        "wake_words": load_wake_words(),
     }
 
 
@@ -2360,38 +2220,6 @@ class AriaHandler(BaseHTTPRequestHandler):
         if self.path == "/api/improvements":
             updated = IMPROVEMENTS.update(payload)
             self._send_json({"ok": True, "improvements": updated, "status": status_payload()})
-            return
-
-        if self.path == "/api/wake-words":
-            try:
-                names = save_wake_words(payload.get("primary_name", ""), payload.get("alternate_names", []))
-            except ValueError as exc:
-                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            self._send_json({"ok": True, "wake_words": names, "status": status_payload()})
-            return
-
-        if self.path == "/api/improvements/train":
-            notes = str(payload.get("notes", "")).strip()
-            if len(notes) < 8:
-                self._send_json({"error": "Add a little more detail before training ARIA."}, status=HTTPStatus.BAD_REQUEST)
-                return
-            try:
-                plan = suggest_training_plan(notes)
-            except Exception as exc:
-                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-            self._send_json({"ok": True, "preview": plan, "notes": notes, "status": status_payload()})
-            return
-
-        if self.path == "/api/improvements/apply-training":
-            notes = str(payload.get("notes", "")).strip()
-            changes = sanitize_improvement_patch(payload.get("changes", {}))
-            if not changes:
-                self._send_json({"error": "There are no approved training changes to apply."}, status=HTTPStatus.BAD_REQUEST)
-                return
-            updated = IMPROVEMENTS.update({**changes, "training_notes": notes})
-            self._send_json({"ok": True, "improvements": updated, "applied": changes, "status": status_payload()})
             return
 
         if self.path == "/api/test-connection":
@@ -3480,151 +3308,6 @@ PYEOF
       color: var(--muted);
     }
     .notice strong { color: var(--text); }
-    .custom-field {
-      display: grid;
-      gap: 8px;
-    }
-    .custom-field textarea {
-      width: 100%;
-      min-height: 92px;
-      resize: vertical;
-      padding: 14px 16px;
-      background: var(--panel-strong);
-      color: var(--text);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      font: inherit;
-    }
-    .custom-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-    .settings-shell {
-      display: grid;
-      grid-template-columns: 220px minmax(0, 1fr);
-      gap: 18px;
-    }
-    .settings-sidebar {
-      display: grid;
-      gap: 8px;
-      align-content: start;
-      padding: 8px;
-      border-radius: 24px;
-      border: 1px solid var(--line);
-      background: var(--panel-strong);
-    }
-    .settings-nav-btn {
-      display: flex;
-      justify-content: flex-start;
-      border-radius: 16px;
-      padding: 12px 14px;
-      background: transparent;
-      box-shadow: none;
-    }
-    .settings-nav-btn.active {
-      background: var(--surface-soft);
-      border-color: var(--line);
-    }
-    .settings-panels {
-      display: grid;
-    }
-    .settings-panel {
-      display: none;
-      gap: 16px;
-    }
-    .settings-panel.active {
-      display: grid;
-    }
-    .training-tabs {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .training-tab {
-      border-radius: 14px;
-      padding: 10px 14px;
-    }
-    .training-tab.active {
-      background: var(--surface-soft);
-    }
-    .training-pane {
-      display: none;
-      gap: 14px;
-    }
-    .training-pane.active {
-      display: grid;
-    }
-    .heard-list {
-      display: grid;
-      gap: 8px;
-    }
-    .heard-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 12px 14px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      background: var(--surface-soft);
-    }
-    .entry-list {
-      display: grid;
-      gap: 10px;
-      margin-top: 6px;
-    }
-    .entry-card {
-      display: grid;
-      gap: 10px;
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: var(--surface-soft);
-    }
-    .entry-card-header {
-      display: flex;
-      align-items: start;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .entry-card-title {
-      font-weight: 600;
-      color: var(--text);
-    }
-    .entry-card-meta {
-      color: var(--muted);
-      font-size: 0.9rem;
-      line-height: 1.45;
-    }
-    .entry-card-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .training-preview {
-      display: none;
-      margin-top: 12px;
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: var(--surface-soft);
-      gap: 12px;
-    }
-    .training-preview.open {
-      display: grid;
-    }
-    .training-preview-block {
-      display: grid;
-      gap: 6px;
-    }
-    .training-preview pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font: inherit;
-      color: var(--text);
-    }
     @media (max-width: 720px) {
       body { padding: 16px; }
       .hero { grid-template-columns: 1fr; }
@@ -3632,7 +3315,7 @@ PYEOF
       .core { width: 84px; height: 84px; }
       .composer { grid-template-columns: 1fr; }
       .command-bar { gap: 10px; }
-      .settings-shell { grid-template-columns: 1fr; }
+      .modal-grid { grid-template-columns: 1fr; }
       .tool-hub { grid-template-columns: 1fr; }
       .result-grid { grid-template-columns: 1fr; }
       .app { min-height: calc(100vh - 32px); }
@@ -3664,7 +3347,7 @@ PYEOF
               <div class="hero-top">
                 <div>
                   <p class="eyebrow"><span>Voice</span><span>Workspace</span></p>
-                  <h1 id="assistantNameHeading">ARIA</h1>
+                  <h1>ARIA</h1>
                   <div id="wakeState" class="stat-value voice-state"><span class="voice-state-dot"></span><span id="wakeStateText" class="voice-state-text">Ready</span></div>
                 </div>
                 <div id="core" class="core idle"></div>
@@ -3686,7 +3369,7 @@ PYEOF
                 <button id="darkThemeBtn" class="theme-chip icon-button" type="button" aria-label="Dark mode" title="Dark mode"><i data-lucide="moon"></i></button>
               </div>
               <div class="badge-row" id="activeBadges"></div>
-              <p id="assistantWakeHint" class="hint">Say “aria” to wake it, or type directly below.</p>
+              <p class="hint">Say “aria” to wake it, or type directly below.</p>
             </div>
           </section>
 
@@ -3708,166 +3391,48 @@ PYEOF
         <h2 style="margin:0;">Settings</h2>
         <button id="closeSettingsBtn" class="icon-button" aria-label="Close settings" title="Close settings"><i data-lucide="x"></i></button>
       </div>
-      <div class="settings-shell">
-        <aside class="settings-sidebar">
-          <button class="settings-nav-btn active" data-settings-panel="overview" type="button">Program Details</button>
-          <button class="settings-nav-btn" data-settings-panel="models" type="button">AI Models</button>
-          <button class="settings-nav-btn" data-settings-panel="api" type="button">API Keys</button>
-          <button class="settings-nav-btn" data-settings-panel="identity" type="button">Assistant Name</button>
-          <button class="settings-nav-btn" data-settings-panel="training" type="button">Training</button>
-        </aside>
-        <div class="settings-panels">
-          <section id="settingsPanelOverview" class="settings-panel active">
-            <div class="modal-card">
-              <div class="label">Program Details</div>
-              <div id="currentBrainCard" class="stack"></div>
-            </div>
-            <div class="modal-card">
-              <div class="label">Connection Status</div>
-              <div id="connectionStatus" class="stack"></div>
-            </div>
-            <div class="modal-card">
-              <div class="label">Local Model Manager</div>
-              <div id="localModels" class="stack"></div>
-              <div class="install-progress"><span id="installBar"></span></div>
-              <div id="installText" class="hint">No installation in progress.</div>
-            </div>
-            <div id="settingsNotice" class="notice"><strong>Ready.</strong> Choose a section from the left to continue.</div>
-          </section>
-          <section id="settingsPanelModels" class="settings-panel">
-            <div class="modal-card">
-              <div class="label">AI Model Selection</div>
-              <div id="modelList" class="model-list"></div>
-            </div>
-          </section>
-          <section id="settingsPanelApi" class="settings-panel">
-            <div class="modal-card">
-              <div class="label">API Keys</div>
-              <div class="stack">
-                <div class="api-field">
-                  <label for="openaiKey">OpenAI API Key</label>
-                  <input id="openaiKey" placeholder="sk-...">
-                  <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI API key</a>
-                </div>
-                <div class="api-field">
-                  <label for="geminiKey">Gemini API Key</label>
-                  <input id="geminiKey" placeholder="AIza...">
-                  <a href="https://makersuite.google.com/app/apikey" target="_blank">Gemini API key</a>
-                </div>
-                <div class="api-field">
-                  <label for="anthropicKey">Anthropic API Key</label>
-                  <input id="anthropicKey" placeholder="sk-ant-...">
-                  <a href="https://console.anthropic.com/" target="_blank">Anthropic API key</a>
-                </div>
-                <button id="saveKeysBtn">Save & Validate</button>
+      <div class="modal-grid">
+        <div class="modal-card">
+          <div class="label">AI Model Selection</div>
+          <div id="modelList" class="model-list"></div>
+        </div>
+        <div class="stack">
+          <div class="modal-card">
+            <div class="label">Engine</div>
+            <div id="currentBrainCard" class="stack"></div>
+          </div>
+          <div class="modal-card">
+            <div class="label">Connection Status</div>
+            <div id="connectionStatus" class="stack"></div>
+          </div>
+          <div class="modal-card">
+            <div class="label">API Keys</div>
+            <div class="stack">
+              <div class="api-field">
+                <label for="openaiKey">OpenAI API Key</label>
+                <input id="openaiKey" placeholder="sk-...">
+                <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI API key</a>
               </div>
+              <div class="api-field">
+                <label for="geminiKey">Gemini API Key</label>
+                <input id="geminiKey" placeholder="AIza...">
+                <a href="https://makersuite.google.com/app/apikey" target="_blank">Gemini API key</a>
+              </div>
+              <div class="api-field">
+                <label for="anthropicKey">Anthropic API Key</label>
+                <input id="anthropicKey" placeholder="sk-ant-...">
+                <a href="https://console.anthropic.com/" target="_blank">Anthropic API key</a>
+              </div>
+              <button id="saveKeysBtn">Save & Validate</button>
             </div>
-          </section>
-          <section id="settingsPanelIdentity" class="settings-panel">
-            <div class="modal-card">
-              <div class="label">Assistant Identity</div>
-              <div class="stack">
-                <div class="custom-field">
-                  <label for="assistantPrimaryName">Assistant Name</label>
-                  <input id="assistantPrimaryName" placeholder="aria">
-                </div>
-                <div class="custom-field">
-                  <label for="assistantAlternateNames">Alternate Pronunciations</label>
-                  <input id="assistantAlternateNames" placeholder="area, arya">
-                  <div class="hint">Try calling the assistant and see how it hears you. If it catches a different pronunciation, add it below.</div>
-                </div>
-                <button id="saveAssistantIdentityBtn" type="button">Save Assistant Name</button>
-              </div>
-            </div>
-            <div class="modal-card">
-              <div class="label">Pronunciation Helper</div>
-              <div class="stack">
-                <div class="hint">Say the assistant name a few times. The last five heard phrases will appear below.</div>
-                <div class="custom-actions">
-                  <button id="startIdentityTestBtn" type="button">Start Hearing Test</button>
-                </div>
-                <div id="heardPronunciations" class="heard-list"></div>
-              </div>
-            </div>
-          </section>
-          <section id="settingsPanelTraining" class="settings-panel">
-            <div class="modal-card">
-              <div class="label">Training</div>
-              <div class="training-tabs">
-                <button id="trainingTabGuidance" class="training-tab active" type="button">Guidance</button>
-                <button id="trainingTabSpeech" class="training-tab" type="button">Speech</button>
-                <button id="trainingTabShortcuts" class="training-tab" type="button">Shortcuts</button>
-                <button id="trainingTabAssist" class="training-tab" type="button">AI Assist</button>
-              </div>
-              <div id="trainingPaneGuidance" class="training-pane active">
-                <div class="custom-field">
-                  <label for="promptAppendInput">Personal Guidance</label>
-                  <textarea id="promptAppendInput" placeholder="Describe how the assistant should behave for you."></textarea>
-                </div>
-                <div class="custom-actions">
-                  <button id="saveParametersBtn" type="button">Save Guidance</button>
-                </div>
-                <div class="entry-list">
-                  <div id="guidanceSummaryCard" class="entry-card"></div>
-                </div>
-              </div>
-              <div id="trainingPaneSpeech" class="training-pane">
-                <div class="custom-field">
-                  <label for="speechFixSourceInput">Heard As</label>
-                  <input id="speechFixSourceInput" placeholder="ear phone">
-                </div>
-                <div class="custom-field">
-                  <label for="speechFixTargetInput">Use Instead</label>
-                  <input id="speechFixTargetInput" placeholder="earphone">
-                </div>
-                <div class="custom-actions">
-                  <button id="saveSpeechFixBtn" type="button">Save Speech Correction</button>
-                </div>
-                <div class="entry-list">
-                  <div id="speechFixesSummary"></div>
-                </div>
-              </div>
-              <div id="trainingPaneShortcuts" class="training-pane">
-                <div class="custom-field">
-                  <label for="commandAliasSourceInput">Shortcut Phrase</label>
-                  <input id="commandAliasSourceInput" placeholder="study mode">
-                </div>
-                <div class="custom-field">
-                  <label for="commandAliasTargetInput">Should Trigger</label>
-                  <input id="commandAliasTargetInput" placeholder="open youtube and search study with me">
-                </div>
-                <div class="custom-actions">
-                  <button id="saveCommandAliasBtn" type="button">Save Shortcut</button>
-                </div>
-                <div class="entry-list">
-                  <div id="commandAliasesSummary"></div>
-                </div>
-              </div>
-              <div id="trainingPaneAssist" class="training-pane">
-                <div class="custom-field">
-                  <label for="trainingNotesInput">Training Notes</label>
-                  <textarea id="trainingNotesInput" placeholder="Describe what ARIA should understand better for you. ARIA will first show what it understood, then wait for your approval before saving anything."></textarea>
-                </div>
-                <div class="custom-actions">
-                  <button id="trainParametersBtn" type="button">Analyze Notes</button>
-                </div>
-                <div id="trainingPreview" class="training-preview">
-                  <div class="training-preview-block">
-                    <div class="label">What ARIA Understood</div>
-                    <pre id="trainingUnderstood">No analysis yet.</pre>
-                  </div>
-                  <div class="training-preview-block">
-                    <div class="label">Planned Parameter Changes</div>
-                    <pre id="trainingChanges">No approved changes yet.</pre>
-                  </div>
-                  <div class="custom-actions">
-                    <button id="applyTrainingBtn" type="button">Approve & Apply</button>
-                    <button id="discardTrainingBtn" type="button">Discard</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
+          </div>
+          <div class="modal-card">
+            <div class="label">Local Model Manager</div>
+            <div id="localModels" class="stack"></div>
+            <div class="install-progress"><span id="installBar"></span></div>
+            <div id="installText" class="hint">No installation in progress.</div>
+          </div>
+          <div id="settingsNotice" class="notice"><strong>Ready.</strong> Choose a model to use, or keep Smart.</div>
         </div>
       </div>
     </section>
@@ -3892,16 +3457,6 @@ PYEOF
     const settingsBtn = document.getElementById("settingsBtn");
     const settingsOverlay = document.getElementById("settingsOverlay");
     const closeSettingsBtn = document.getElementById("closeSettingsBtn");
-    const settingsNavButtons = Array.from(document.querySelectorAll("[data-settings-panel]"));
-    const settingsPanels = {
-      overview: document.getElementById("settingsPanelOverview"),
-      models: document.getElementById("settingsPanelModels"),
-      api: document.getElementById("settingsPanelApi"),
-      identity: document.getElementById("settingsPanelIdentity"),
-      training: document.getElementById("settingsPanelTraining"),
-    };
-    const assistantNameHeading = document.getElementById("assistantNameHeading");
-    const assistantWakeHint = document.getElementById("assistantWakeHint");
     const modelList = document.getElementById("modelList");
     const connectionStatus = document.getElementById("connectionStatus");
     const currentBrainCard = document.getElementById("currentBrainCard");
@@ -3909,41 +3464,6 @@ PYEOF
     const installBar = document.getElementById("installBar");
     const installText = document.getElementById("installText");
     const settingsNotice = document.getElementById("settingsNotice");
-    const assistantPrimaryName = document.getElementById("assistantPrimaryName");
-    const assistantAlternateNames = document.getElementById("assistantAlternateNames");
-    const saveAssistantIdentityBtn = document.getElementById("saveAssistantIdentityBtn");
-    const startIdentityTestBtn = document.getElementById("startIdentityTestBtn");
-    const heardPronunciations = document.getElementById("heardPronunciations");
-    const promptAppendInput = document.getElementById("promptAppendInput");
-    const guidanceSummaryCard = document.getElementById("guidanceSummaryCard");
-    const speechFixSourceInput = document.getElementById("speechFixSourceInput");
-    const speechFixTargetInput = document.getElementById("speechFixTargetInput");
-    const saveSpeechFixBtn = document.getElementById("saveSpeechFixBtn");
-    const speechFixesSummary = document.getElementById("speechFixesSummary");
-    const commandAliasSourceInput = document.getElementById("commandAliasSourceInput");
-    const commandAliasTargetInput = document.getElementById("commandAliasTargetInput");
-    const saveCommandAliasBtn = document.getElementById("saveCommandAliasBtn");
-    const commandAliasesSummary = document.getElementById("commandAliasesSummary");
-    const trainingNotesInput = document.getElementById("trainingNotesInput");
-    const saveParametersBtn = document.getElementById("saveParametersBtn");
-    const trainParametersBtn = document.getElementById("trainParametersBtn");
-    const trainingTabButtons = {
-      guidance: document.getElementById("trainingTabGuidance"),
-      speech: document.getElementById("trainingTabSpeech"),
-      shortcuts: document.getElementById("trainingTabShortcuts"),
-      assist: document.getElementById("trainingTabAssist"),
-    };
-    const trainingPanes = {
-      guidance: document.getElementById("trainingPaneGuidance"),
-      speech: document.getElementById("trainingPaneSpeech"),
-      shortcuts: document.getElementById("trainingPaneShortcuts"),
-      assist: document.getElementById("trainingPaneAssist"),
-    };
-    const trainingPreview = document.getElementById("trainingPreview");
-    const trainingUnderstood = document.getElementById("trainingUnderstood");
-    const trainingChanges = document.getElementById("trainingChanges");
-    const applyTrainingBtn = document.getElementById("applyTrainingBtn");
-    const discardTrainingBtn = document.getElementById("discardTrainingBtn");
     const activeBadges = document.getElementById("activeBadges");
     const openaiKey = document.getElementById("openaiKey");
     const geminiKey = document.getElementById("geminiKey");
@@ -3964,7 +3484,6 @@ PYEOF
     let wakeListeningActive = false;
     let wakeRestartTimer = null;
     let wakeWatchdog = null;
-    let micRecoveryTimer = null;
     let wakeStartFailures = 0;
     let currentState = "idle";
     let stateTimer = null;
@@ -3983,13 +3502,6 @@ PYEOF
     let chatOpeningTimer = null;
     let chatDestroyTimer = null;
     let chatInputValue = "";
-    let pendingTrainingPlan = null;
-    let settingsPanel = "overview";
-    let trainingTab = "guidance";
-    let identityRecognition = null;
-    let heardPronunciationItems = [];
-    let editingSpeechFixKey = "";
-    let editingCommandAliasKey = "";
     const listeningSound = new Audio("/listening.mp3");
     const processingSound = new Audio("/processing_command.mp3");
     const completeSound = new Audio("/complete.mp3");
@@ -4016,205 +3528,6 @@ PYEOF
       wakeRegex = new RegExp(`\\b(${wakeWords.map(escapeRegex).join("|")})\\b`, "i");
     }
 
-    function displayAssistantName(name) {
-      const cleaned = String(name || "ARIA").trim();
-      return cleaned ? cleaned.charAt(0).toUpperCase() + cleaned.slice(1) : "ARIA";
-    }
-
-    function currentAssistantName() {
-      return displayAssistantName((appStatus && appStatus.assistant_name) || wakeWords[0] || "ARIA");
-    }
-
-    function applyAssistantIdentity(status) {
-      const name = displayAssistantName((status && status.assistant_name) || wakeWords[0] || "ARIA");
-      assistantNameHeading.textContent = name;
-      assistantWakeHint.textContent = `Say “${name}” to wake it, or type directly below.`;
-      document.title = name;
-    }
-
-    function stringifyMap(mapping = {}) {
-      return Object.entries(mapping).map(([key, value]) => `${key} => ${value}`).join("\n");
-    }
-
-    function prettyJSON(value) {
-      return JSON.stringify(value || {}, null, 2);
-    }
-
-    function currentImprovements() {
-      return (appStatus && appStatus.improvements) || {};
-    }
-
-    function setTrainingPreview(plan = null) {
-      pendingTrainingPlan = plan;
-      if (!plan) {
-        trainingPreview.classList.remove("open");
-        trainingUnderstood.textContent = "No analysis yet.";
-        trainingChanges.textContent = "No approved changes yet.";
-        return;
-      }
-      trainingPreview.classList.add("open");
-      trainingUnderstood.textContent = plan.understanding || "ARIA could not summarize the notes clearly.";
-      trainingChanges.textContent = prettyJSON(plan.changes || {});
-    }
-
-    function setSettingsPanel(panel) {
-      settingsPanel = panel;
-      settingsNavButtons.forEach((button) => {
-        button.classList.toggle("active", button.dataset.settingsPanel === panel);
-      });
-      Object.entries(settingsPanels).forEach(([key, element]) => {
-        if (!element) return;
-        element.classList.toggle("active", key === panel);
-      });
-    }
-
-    function setTrainingTab(tab) {
-      trainingTab = tab;
-      Object.entries(trainingTabButtons).forEach(([key, button]) => {
-        if (button) button.classList.toggle("active", key === tab);
-      });
-      Object.entries(trainingPanes).forEach(([key, pane]) => {
-        if (pane) pane.classList.toggle("active", key === tab);
-      });
-    }
-
-    function renderHeardPronunciations() {
-      heardPronunciations.innerHTML = "";
-      if (!heardPronunciationItems.length) {
-        heardPronunciations.innerHTML = '<div class="hint">No recent pronunciations captured yet.</div>';
-        return;
-      }
-      heardPronunciationItems.slice(0, 5).forEach((item) => {
-        const row = document.createElement("div");
-        row.className = "heard-item";
-        row.innerHTML = `<span>${escapeHtml(item)}</span>`;
-        const addButton = document.createElement("button");
-        addButton.type = "button";
-        addButton.className = "icon-button";
-        addButton.innerHTML = '<i data-lucide="plus"></i>';
-        addButton.onclick = () => {
-          const values = assistantAlternateNames.value.split(",").map((entry) => entry.trim()).filter(Boolean);
-          if (!values.includes(item)) {
-            values.push(item);
-            assistantAlternateNames.value = values.join(", ");
-          }
-        };
-        row.appendChild(addButton);
-        heardPronunciations.appendChild(row);
-      });
-      refreshLucide();
-    }
-
-    function renderGuidanceSummary() {
-      const guidance = String(currentImprovements().prompt_append || "").trim();
-      guidanceSummaryCard.innerHTML = guidance
-        ? `<div class="entry-card-header"><div><div class="entry-card-title">Saved Guidance</div><div class="entry-card-meta">${escapeHtml(guidance)}</div></div><div class="entry-card-actions"><button id="editGuidanceBtn" type="button">Edit</button><button id="deleteGuidanceBtn" type="button">Delete</button></div></div>`
-        : `<div class="entry-card-title">Saved Guidance</div><div class="entry-card-meta">No personal guidance saved yet.</div>`;
-      const editBtn = document.getElementById("editGuidanceBtn");
-      const deleteBtn = document.getElementById("deleteGuidanceBtn");
-      if (editBtn) {
-        editBtn.onclick = () => {
-          setSettingsPanel("training");
-          setTrainingTab("guidance");
-          promptAppendInput.focus();
-          promptAppendInput.setSelectionRange(promptAppendInput.value.length, promptAppendInput.value.length);
-        };
-      }
-      if (deleteBtn) {
-        deleteBtn.onclick = async () => {
-          const response = await postJSON("/api/improvements", {
-            _replace_dicts: true,
-            prompt_append: "",
-            speech_fixes: currentImprovements().speech_fixes || {},
-            command_aliases: currentImprovements().command_aliases || {},
-            training_notes: currentImprovements().training_notes || "",
-          });
-          appStatus = response.status;
-          renderStatus(appStatus);
-          showSettingsNotice("Personal guidance removed.", "success");
-        };
-      }
-    }
-
-    function renderMapSummary(container, entries, type) {
-      container.innerHTML = "";
-      const keys = Object.keys(entries || {});
-      if (!keys.length) {
-        container.innerHTML = `<div class="entry-card"><div class="entry-card-title">${type === "speech" ? "Speech corrections" : "Command shortcuts"}</div><div class="entry-card-meta">No saved entries yet.</div></div>`;
-        return;
-      }
-      keys.sort().forEach((key) => {
-        const value = entries[key];
-        const card = document.createElement("div");
-        card.className = "entry-card";
-        card.innerHTML = `
-          <div class="entry-card-header">
-            <div>
-              <div class="entry-card-title">${escapeHtml(key)}</div>
-              <div class="entry-card-meta">${escapeHtml(value)}</div>
-            </div>
-            <div class="entry-card-actions">
-              <button type="button" data-entry-edit="${escapeHtml(key)}">Edit</button>
-              <button type="button" data-entry-delete="${escapeHtml(key)}">Delete</button>
-            </div>
-          </div>`;
-        container.appendChild(card);
-      });
-      container.querySelectorAll("[data-entry-edit]").forEach((button) => {
-        button.onclick = () => {
-          const key = button.getAttribute("data-entry-edit");
-          if (type === "speech") {
-            editingSpeechFixKey = key;
-            speechFixSourceInput.value = key;
-            speechFixTargetInput.value = entries[key];
-            setTrainingTab("speech");
-            speechFixSourceInput.focus();
-          } else {
-            editingCommandAliasKey = key;
-            commandAliasSourceInput.value = key;
-            commandAliasTargetInput.value = entries[key];
-            setTrainingTab("shortcuts");
-            commandAliasSourceInput.focus();
-          }
-        };
-      });
-      container.querySelectorAll("[data-entry-delete]").forEach((button) => {
-        button.onclick = async () => {
-          const key = button.getAttribute("data-entry-delete");
-          const next = { ...(entries || {}) };
-          delete next[key];
-          const payload = {
-            _replace_dicts: true,
-            prompt_append: currentImprovements().prompt_append || "",
-            speech_fixes: type === "speech" ? next : (currentImprovements().speech_fixes || {}),
-            command_aliases: type === "shortcuts" ? next : (currentImprovements().command_aliases || {}),
-            training_notes: currentImprovements().training_notes || "",
-          };
-          const response = await postJSON("/api/improvements", payload);
-          appStatus = response.status;
-          renderStatus(appStatus);
-          showSettingsNotice(type === "speech" ? "Speech correction removed." : "Shortcut removed.", "success");
-        };
-      });
-    }
-
-    function parseMap(text) {
-      const output = {};
-      String(text || "").split("\n").forEach((line) => {
-        const cleaned = line.trim();
-        if (!cleaned) return;
-        const separator = cleaned.includes("=>") ? "=>" : cleaned.includes(":") ? ":" : "";
-        if (!separator) return;
-        const parts = cleaned.split(separator);
-        const left = (parts.shift() || "").trim();
-        const right = parts.join(separator).trim();
-        if (left && right) {
-          output[left] = right;
-        }
-      });
-      return output;
-    }
-
     function stripWakeWords(text) {
       const regex = new RegExp(`\\b(${wakeWords.map(escapeRegex).join("|")})\\b`, "ig");
       return String(text || "").replace(regex, " ").replace(/\s+/g, " ").trim();
@@ -4228,7 +3541,7 @@ PYEOF
     function beginWakePromptSequence() {
       const mode = pendingWakePromptMode;
       pendingWakePromptMode = "";
-      const promptText = mode === "repeat" ? `That's ${currentAssistantName()}, do you want to say something?` : `${currentAssistantName()} is listening. Say your command now.`;
+      const promptText = mode === "repeat" ? "That's me, do you want to say something?" : "Wake word accepted. Say your command now.";
       playCue(listeningSound);
       setStatus("Listening", "listening");
       setVoiceMode("Listening");
@@ -4382,7 +3695,7 @@ PYEOF
       if (sleepMode) {
         setStatus("Sleeping", "idle");
         setVoiceMode("Sleeping");
-        setTranscript(`${currentAssistantName()} is sleeping.`);
+        setTranscript("Assistant sleeping.");
         return;
       }
       if (wakeWordEnabled) {
@@ -4390,14 +3703,14 @@ PYEOF
         if (ok) {
           setStatus("Ready", "armed");
           setVoiceMode("Ready");
-          setTranscript(`${currentAssistantName()} is awake.`);
+          setTranscript("Assistant awake.");
           scheduleWakeRestart();
           return;
         }
       }
       setStatus("Ready", "armed");
       setVoiceMode("Ready");
-      setTranscript(`${currentAssistantName()} is awake.`);
+      setTranscript("Assistant awake.");
     }
 
     function applyTheme(theme) {
@@ -4431,19 +3744,6 @@ PYEOF
       }
     }
 
-    function scheduleMicRecovery(reason = "Microphone connection changed.") {
-      if (sleepMode || !wakeWordEnabled) return;
-      clearTimeout(micRecoveryTimer);
-      setTranscript(reason);
-      micRecoveryTimer = setTimeout(async () => {
-        releaseMic();
-        const ok = await ensureMic();
-        if (ok && !commandCaptureActive && !wakeListeningActive) {
-          scheduleWakeRestart();
-        }
-      }, 280);
-    }
-
     function playCue(audio) {
       try {
         audio.pause();
@@ -4463,8 +3763,7 @@ PYEOF
       chatMessages.forEach((message) => {
         const item = document.createElement("article");
         item.className = `msg ${message.role}`;
-        const roleLabel = message.role === "aria" ? currentAssistantName() : message.role;
-        item.innerHTML = `<div class="role">${escapeHtml(roleLabel)}</div><div>${escapeHtml(message.text)}</div>`;
+        item.innerHTML = `<div class="role">${message.role}</div><div>${escapeHtml(message.text)}</div>`;
         chat.appendChild(item);
       });
       chat.scrollTop = chat.scrollHeight;
@@ -4669,7 +3968,7 @@ PYEOF
                 async () => {
                   await installModel(model.id);
                   await saveSettings({ selected_model: model.id });
-                  showSettingsNotice(`${model.label} is being installed now. ${currentAssistantName()} will switch to it when ready.`, "success");
+                  showSettingsNotice(`${model.label} is being installed now. ARIA will switch to it when ready.`, "success");
                 }
               );
               return;
@@ -4703,27 +4002,16 @@ PYEOF
     function renderStatus(status) {
       const settings = status.settings;
       const active = status.active;
-      setSettingsPanel(settingsPanel);
-      setTrainingTab(trainingTab);
       updateWakeWords(status.wake_words || []);
-      applyAssistantIdentity(status);
       openaiKey.value = settings.api_keys.openai || "";
       geminiKey.value = settings.api_keys.gemini || "";
       anthropicKey.value = settings.api_keys.anthropic || "";
-      assistantPrimaryName.value = status.assistant_name || "";
-      assistantAlternateNames.value = (status.assistant_aliases || []).join(", ");
-      promptAppendInput.value = (status.improvements && status.improvements.prompt_append) || "";
-      trainingNotesInput.value = (status.improvements && status.improvements.training_notes) || "";
-      renderGuidanceSummary();
-      renderMapSummary(speechFixesSummary, (status.improvements && status.improvements.speech_fixes) || {}, "speech");
-      renderMapSummary(commandAliasesSummary, (status.improvements && status.improvements.command_aliases) || {}, "shortcuts");
       renderCurrentBrain(active);
       renderConnectionStatus(status.provider_status);
       renderModels(status.models, settings.selected_model);
       renderLocalModels(status.installed_local_models, status.ollama_available);
       renderInstallStatus(status.install_status);
       badgesForModel(active);
-      renderHeardPronunciations();
       if (active.offline_mode) {
         setTranscript("Offline Mode. Using local AI brain.");
       }
@@ -4735,9 +4023,6 @@ PYEOF
     async function refreshStatus() {
       appStatus = await fetch("/api/status").then((r) => r.json());
       renderStatus(appStatus);
-      if (!trainingNotesInput.value.trim()) {
-        setTrainingPreview(null);
-      }
       if (statusPoll && appStatus.install_status && !appStatus.install_status.running) {
         clearInterval(statusPoll);
         statusPoll = null;
@@ -4748,7 +4033,7 @@ PYEOF
       await postJSON("/api/install-model", { model: modelId });
       if (statusPoll) clearInterval(statusPoll);
       statusPoll = setInterval(refreshStatus, 1200);
-      showSettingsNotice(`Installing ${modelId}. ${currentAssistantName()} will keep updating the progress below.`, "success");
+      showSettingsNotice(`Installing ${modelId}. ARIA will keep updating the progress below.`, "success");
     }
 
     async function postJSON(url, payload = {}) {
@@ -4766,7 +4051,7 @@ PYEOF
 
     async function sendText(text) {
       if (sleepMode) {
-        setTranscript(`${currentAssistantName()} is sleeping.`);
+        setTranscript("Assistant sleeping.");
         return;
       }
       const trimmed = text.trim();
@@ -4824,24 +4109,6 @@ PYEOF
       if (micReady && micStream) return true;
       try {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const [track] = micStream.getAudioTracks();
-        if (track) {
-          track.onended = () => {
-            micReady = false;
-            scheduleMicRecovery(`${currentAssistantName()} lost the microphone stream. Reconnecting voice capture.`);
-          };
-          track.onmute = () => {
-            if (!sleepMode && wakeWordEnabled) {
-              setTranscript(`${currentAssistantName()} is waiting for microphone audio to resume.`);
-            }
-          };
-          track.onunmute = () => {
-            micReady = true;
-            if (!sleepMode && wakeWordEnabled && !commandCaptureActive && !wakeListeningActive) {
-              scheduleWakeRestart();
-            }
-          };
-        }
         micReady = true;
         setStatus(wakeWordEnabled ? "Ready" : "Sleeping", wakeWordEnabled ? "armed" : "idle");
         setVoiceMode(wakeWordEnabled ? "Ready" : "Sleeping");
@@ -4850,20 +4117,14 @@ PYEOF
         micStream = null;
         micReady = false;
         setStatus(`Mic error: ${error.message}`, "error");
-        setTranscript(`${currentAssistantName()} cannot access the microphone right now.`);
+        setTranscript("Microphone access is blocked or unavailable.");
         return false;
       }
     }
 
     function releaseMic() {
-      clearTimeout(micRecoveryTimer);
       if (micStream) {
-        micStream.getTracks().forEach((track) => {
-          track.onended = null;
-          track.onmute = null;
-          track.onunmute = null;
-          track.stop();
-        });
+        micStream.getTracks().forEach((track) => track.stop());
       }
       micStream = null;
       micReady = false;
@@ -4936,7 +4197,7 @@ PYEOF
         wakeBtn.disabled = true;
         setStatus("Browser speech recognition unavailable", "error");
         setVoiceMode("Unavailable");
-        setTranscript(`Use typed input because this browser does not expose speech recognition for ${currentAssistantName()}.`);
+        setTranscript("Use typed input because this browser does not expose speech recognition.");
         return;
       }
 
@@ -5076,11 +4337,11 @@ PYEOF
         stopAllRecognition();
         if (wakeWordEnabled) {
           if (!(await ensureMic())) return;
-          setTranscript(`${currentAssistantName()} resumed voice capture.`);
+          setTranscript("Voice capture resumed.");
           scheduleWakeRestart();
         } else {
           releaseMic();
-          setTranscript(`${currentAssistantName()} paused voice capture.`);
+          setTranscript("Voice capture paused.");
           setStatus("Sleeping", "idle");
         }
       };
@@ -5090,23 +4351,6 @@ PYEOF
       };
 
       armWakeWatchdog();
-      if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === "function") {
-        navigator.mediaDevices.addEventListener("devicechange", () => {
-          if (!sleepMode && wakeWordEnabled) {
-            scheduleMicRecovery(`Audio devices changed. Reconnecting voice capture for ${currentAssistantName()}.`);
-          }
-        });
-      }
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && !sleepMode && wakeWordEnabled && !commandCaptureActive) {
-          scheduleMicRecovery(`Voice capture check after returning to ${currentAssistantName()}.`);
-        }
-      });
-      window.addEventListener("focus", () => {
-        if (!sleepMode && wakeWordEnabled && !commandCaptureActive && !wakeListeningActive) {
-          scheduleWakeRestart();
-        }
-      });
     }
 
     chatToggleBtn.onclick = () => setChatOpen(!chatOpen);
@@ -5120,22 +4364,12 @@ PYEOF
       renderToolTimeline();
       renderResultCards([]);
       addMessage("aria", "Conversation reset.");
-      setTranscript(`${currentAssistantName()} conversation reset.`);
+      setTranscript("Conversation reset.");
       setStatus(wakeWordEnabled ? "Ready" : "Sleeping", wakeWordEnabled ? "armed" : "idle");
       setVoiceMode(wakeWordEnabled ? "Ready" : "Sleeping");
     };
 
-    settingsNavButtons.forEach((button) => {
-      button.onclick = () => setSettingsPanel(button.dataset.settingsPanel);
-    });
-    Object.entries(trainingTabButtons).forEach(([key, button]) => {
-      if (button) button.onclick = () => setTrainingTab(key);
-    });
-
-    settingsBtn.onclick = () => {
-      settingsOverlay.classList.add("open");
-      setSettingsPanel("overview");
-    };
+    settingsBtn.onclick = () => settingsOverlay.classList.add("open");
     closeSettingsBtn.onclick = () => settingsOverlay.classList.remove("open");
     settingsOverlay.onclick = (event) => {
       if (event.target === settingsOverlay) settingsOverlay.classList.remove("open");
@@ -5185,166 +4419,6 @@ PYEOF
       await refreshStatus();
     };
 
-    saveAssistantIdentityBtn.onclick = async () => {
-      try {
-        const primaryName = assistantPrimaryName.value.trim().toLowerCase();
-        const alternateNames = assistantAlternateNames.value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
-        const response = await postJSON("/api/wake-words", { primary_name: primaryName, alternate_names: alternateNames });
-        appStatus = response.status;
-        renderStatus(appStatus);
-        showSettingsNotice(`${displayAssistantName(primaryName)} is now the active wake name.`, "success");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    startIdentityTestBtn.onclick = async () => {
-      if (!SpeechRecognition) {
-        showSettingsNotice("This browser cannot run the pronunciation helper.", "error");
-        return;
-      }
-      try {
-        if (!(await ensureMic())) return;
-        if (identityRecognition) {
-          try { identityRecognition.stop(); } catch (_) {}
-        }
-        identityRecognition = new SpeechRecognition();
-        identityRecognition.lang = "en-US";
-        identityRecognition.interimResults = false;
-        identityRecognition.continuous = true;
-        identityRecognition.maxAlternatives = 3;
-        identityRecognition.onresult = (event) => {
-          const text = event.results[event.resultIndex][0].transcript.trim().toLowerCase();
-          if (!text) return;
-          heardPronunciationItems = [text, ...heardPronunciationItems.filter((item) => item !== text)].slice(0, 5);
-          renderHeardPronunciations();
-        };
-        identityRecognition.onerror = () => {};
-        identityRecognition.onend = () => {};
-        identityRecognition.start();
-        showSettingsNotice(`Try calling ${currentAssistantName()} a few times and watch how the browser hears you below.`, "info");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    saveParametersBtn.onclick = async () => {
-      try {
-        const response = await postJSON("/api/improvements", {
-          _replace_dicts: true,
-          prompt_append: promptAppendInput.value.trim(),
-          speech_fixes: currentImprovements().speech_fixes || {},
-          command_aliases: currentImprovements().command_aliases || {},
-          training_notes: trainingNotesInput.value.trim(),
-        });
-        appStatus = response.status;
-        renderStatus(appStatus);
-        setTrainingPreview(null);
-        showSettingsNotice("Personal parameters saved. They will stay on this system after reinstall.", "success");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    saveSpeechFixBtn.onclick = async () => {
-      try {
-        const source = speechFixSourceInput.value.trim();
-        const target = speechFixTargetInput.value.trim();
-        if (!source || !target) {
-          showSettingsNotice("Add both the heard phrase and the corrected phrase.", "error");
-          return;
-        }
-        const next = { ...(currentImprovements().speech_fixes || {}) };
-        if (editingSpeechFixKey && editingSpeechFixKey !== source) {
-          delete next[editingSpeechFixKey];
-        }
-        next[source] = target;
-        const response = await postJSON("/api/improvements", {
-          _replace_dicts: true,
-          prompt_append: currentImprovements().prompt_append || "",
-          speech_fixes: next,
-          command_aliases: currentImprovements().command_aliases || {},
-          training_notes: currentImprovements().training_notes || "",
-        });
-        appStatus = response.status;
-        editingSpeechFixKey = "";
-        speechFixSourceInput.value = "";
-        speechFixTargetInput.value = "";
-        renderStatus(appStatus);
-        showSettingsNotice("Speech correction saved.", "success");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    saveCommandAliasBtn.onclick = async () => {
-      try {
-        const source = commandAliasSourceInput.value.trim();
-        const target = commandAliasTargetInput.value.trim();
-        if (!source || !target) {
-          showSettingsNotice("Add both the shortcut phrase and the action it should trigger.", "error");
-          return;
-        }
-        const next = { ...(currentImprovements().command_aliases || {}) };
-        if (editingCommandAliasKey && editingCommandAliasKey !== source) {
-          delete next[editingCommandAliasKey];
-        }
-        next[source] = target;
-        const response = await postJSON("/api/improvements", {
-          _replace_dicts: true,
-          prompt_append: currentImprovements().prompt_append || "",
-          speech_fixes: currentImprovements().speech_fixes || {},
-          command_aliases: next,
-          training_notes: currentImprovements().training_notes || "",
-        });
-        appStatus = response.status;
-        editingCommandAliasKey = "";
-        commandAliasSourceInput.value = "";
-        commandAliasTargetInput.value = "";
-        renderStatus(appStatus);
-        showSettingsNotice("Shortcut saved.", "success");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    trainParametersBtn.onclick = async () => {
-      try {
-        const notes = trainingNotesInput.value.trim();
-        const response = await postJSON("/api/improvements/train", { notes });
-        appStatus = response.status;
-        renderStatus(appStatus);
-        setTrainingPreview(response.preview || null);
-        showSettingsNotice("Review what ARIA understood below, then approve the changes if they look right.", "info");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    applyTrainingBtn.onclick = async () => {
-      try {
-        if (!pendingTrainingPlan || !pendingTrainingPlan.changes || !Object.keys(pendingTrainingPlan.changes).length) {
-          showSettingsNotice("There are no reviewed training changes to apply yet.", "error");
-          return;
-        }
-        const response = await postJSON("/api/improvements/apply-training", {
-          notes: trainingNotesInput.value.trim(),
-          changes: pendingTrainingPlan.changes,
-        });
-        appStatus = response.status;
-        renderStatus(appStatus);
-        setTrainingPreview(null);
-        showSettingsNotice("Approved training changes were saved to your persistent personal parameters.", "success");
-      } catch (error) {
-        showSettingsNotice(error.message, "error");
-      }
-    };
-
-    discardTrainingBtn.onclick = () => {
-      setTrainingPreview(null);
-      showSettingsNotice("Training preview discarded. Nothing was saved.", "info");
-    };
-
     (async () => {
       const savedTheme = localStorage.getItem("aria-theme");
       if (savedTheme === "dark" || savedTheme === "light") {
@@ -5356,13 +4430,12 @@ PYEOF
       try {
         await fetch("/health");
         await postJSON("/api/warm");
-        await refreshStatus();
         playCue(completeSound);
-        const startupName = currentAssistantName();
-        addMessage("aria", `${startupName} is ready. Say '${startupName}' to wake it, or open settings to choose another AI brain.`);
-        setTranscript(`Say '${startupName}' to wake the assistant.`);
+        addMessage("aria", `ARIA is ready. Say '${wakeWords[0]}' to wake it, or open settings to choose another AI brain.`);
+        setTranscript(`Say '${wakeWords[0]}' to wake the assistant.`);
         setStatus("Preparing", "armed");
         setVoiceMode("Ready");
+        await refreshStatus();
       } catch (error) {
         addMessage("aria", `Startup error: ${error.message}`);
         setStatus("Startup error", "error");
@@ -5495,8 +4568,6 @@ enable_service() {
 
 configure_shell_path() {
   local path_line='export PATH="$HOME/.local/bin:$PATH"'
-  local envd_file="${ENVIRONMENT_DIR}/aria-path.conf"
-  local envd_line='PATH=$HOME/.local/bin:$PATH'
   local profile
   local target_path=""
   local -a shell_profiles=(
@@ -5505,7 +4576,7 @@ configure_shell_path() {
     "${TARGET_HOME}/.zshrc"
   )
 
-  log "[8/9] Ensuring ~/.local/bin is on PATH..."
+  log "[8/9] Ensuring ~/.local/bin is on PATH for Debian shells..."
 
   target_path="$(run_as_target env | awk -F= '$1=="PATH"{print $2}')"
 
@@ -5522,13 +4593,6 @@ configure_shell_path() {
       chown "${TARGET_USER}:${TARGET_GROUP}" "${profile}"
     fi
   done
-
-  install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${ENVIRONMENT_DIR}"
-  if [[ ! -f "${envd_file}" ]] || ! grep -Fqx "${envd_line}" "${envd_file}"; then
-    printf '%s\n' "${envd_line}" >"${envd_file}"
-    chown "${TARGET_USER}:${TARGET_GROUP}" "${envd_file}"
-    chmod 0644 "${envd_file}"
-  fi
 }
 
 print_summary() {
